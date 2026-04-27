@@ -1,0 +1,873 @@
+#!/usr/bin/env python3
+"""
+mcp-sync — Single source of truth for MCP server configs across AI editors.
+
+Author : Sudhanshu Raheja <s7dhansh>
+License: MIT
+Source : https://github.com/s7dhansh/mcp-sync
+
+One canonical ~/.config/mcp/servers.json propagates to:
+  Zed  ·  Kilo  ·  opencode  ·  VS Code  ·  Claude Desktop  ·  Cursor  ·  (+ custom)
+
+Auto-watch via launchd (macOS) or systemd (Linux) fires on every save.
+
+Usage: mcp-sync <command> [options]
+       mcp-sync help
+"""
+
+from __future__ import annotations
+
+__version__ = "0.1.0"
+__author__ = "Sudhanshu Raheja"
+__email__ = "s7dhansh@gmail.com"
+__url__ = "https://github.com/s7dhansh/mcp-sync"
+
+import argparse
+import difflib
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from textwrap import dedent
+
+# ─── paths ────────────────────────────────────────────────────────────────────
+
+HOME = Path.home()
+CONFIG_DIR = HOME / ".config" / "mcp"
+CANONICAL = CONFIG_DIR / "servers.json"
+CUSTOM_TARGETS_FILE = CONFIG_DIR / "targets.json"
+LOG_FILE = HOME / ".local" / "state" / "mcp-sync.log"
+BIN_PATH = HOME / ".local" / "bin" / "mcp-sync"
+
+_user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
+LAUNCHD_LABEL = f"com.{_user}.mcp-sync"
+LAUNCHD_PLIST = HOME / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+
+# ─── JSONC utilities ──────────────────────────────────────────────────────────
+
+
+def find_key_block(text: str, key: str) -> "tuple[int, int] | None":
+    """
+    Find the byte span of  "key": { ... }  in JSONC text.
+    Skips // line comments and /* */ block comments so their braces don't
+    confuse the depth counter.
+    Returns (start_of_key_quote, end_of_closing_brace) or None.
+    """
+    pat = re.compile(r'"' + re.escape(key) + r'"\s*:\s*\{')
+    for m in pat.finditer(text):
+        depth = 1
+        i = m.end()
+        in_str = esc = False
+        while i < len(text) and depth > 0:
+            c = text[i]
+            if not in_str and c == "/" and i + 1 < len(text):
+                if text[i + 1] == "/":
+                    while i < len(text) and text[i] != "\n":
+                        i += 1
+                    continue
+                if text[i + 1] == "*":
+                    i += 2
+                    while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
+                        i += 1
+                    i += 2
+                    continue
+            if esc:
+                esc = False
+            elif c == "\\" and in_str:
+                esc = True
+            elif c == '"':
+                in_str = not in_str
+            elif not in_str:
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return (m.start(), i + 1)
+            i += 1
+    return None
+
+
+def _splice_server(block: str, server_name: str, server_json: str) -> str:
+    """Replace or insert  "server_name": {...}  inside a JSON/JSONC object block."""
+    span = find_key_block(block, server_name)
+    replacement = f'"{server_name}": {server_json}'
+    if span:
+        return block[: span[0]] + replacement + block[span[1] :]
+    close = block.rfind("}")
+    prev = block[:close].rstrip()
+    comma = "," if prev and prev[-1] not in ("{", ",") else ""
+    return block[:close] + f"{comma}\n    {replacement}\n" + block[close:]
+
+
+# ─── canonical config ─────────────────────────────────────────────────────────
+
+
+def load_canonical() -> dict:
+    if not CANONICAL.exists():
+        _die(
+            f"Canonical config not found: {CANONICAL}\n"
+            "       Run 'mcp-sync init' to create it."
+        )
+    return json.loads(CANONICAL.read_text())
+
+
+def save_canonical(data: dict) -> None:
+    CANONICAL.write_text(json.dumps(data, indent=2) + "\n")
+
+
+# ─── per-editor adapters ──────────────────────────────────────────────────────
+
+
+def _adapt_zed(server: dict) -> str:
+    """Zed: context_servers  →  {enabled, command/url, args, env}"""
+    if server["transport"] == "remote":
+        entry: dict = {"enabled": True, "url": server["url"]}
+    else:
+        cmd = server["command"]
+        entry = {"enabled": True, "command": cmd[0], "args": cmd[1:]}
+        if server.get("env"):
+            entry["env"] = server["env"]
+    return json.dumps(entry, indent="\t")
+
+
+def _adapt_kilo_opencode(server: dict) -> str:
+    """Kilo / opencode: mcp  →  {type, command/url, environment}"""
+    if server["transport"] == "remote":
+        entry: dict = {"type": "remote", "url": server["url"]}
+    else:
+        entry = {"type": "local", "command": server["command"]}
+        if server.get("env"):
+            entry["environment"] = server["env"]
+    return json.dumps(entry, indent=2)
+
+
+def _adapt_vscode(server: dict) -> str:
+    """VS Code mcp.json: servers  →  {transport/command, url/args, env}"""
+    if server["transport"] == "remote":
+        entry: dict = {"transport": "streamable-http", "url": server["url"]}
+    else:
+        cmd = server["command"]
+        entry = {"command": cmd[0], "args": cmd[1:]}
+        if server.get("env"):
+            entry["env"] = server["env"]
+    return json.dumps(entry, indent=2)
+
+
+def _adapt_claude(server: dict) -> str:
+    """Claude Desktop / Cursor: mcpServers  →  {command/url, args, env}"""
+    if server["transport"] == "remote":
+        entry: dict = {"url": server["url"]}
+    else:
+        cmd = server["command"]
+        entry = {"command": cmd[0], "args": cmd[1:]}
+        if server.get("env"):
+            entry["env"] = server["env"]
+    return json.dumps(entry, indent=2)
+
+
+ADAPTERS: dict = {
+    "zed": _adapt_zed,
+    "kilo_opencode": _adapt_kilo_opencode,
+    "vscode": _adapt_vscode,
+    "claude": _adapt_claude,
+}
+
+# ─── built-in editor targets ──────────────────────────────────────────────────
+
+# Each target:
+#   name          – display name
+#   path          – path to the editor config file (~ expanded)
+#   parent_key    – the JSON key that holds MCP server entries
+#   adapter       – name of the adapter function above
+#   only_servers  – optional list: sync only these canonical server names
+#                   (omit = all servers)
+#   enabled       – false = skip unless config file is present
+BUILTIN_TARGETS: list[dict] = [
+    {
+        "name": "zed",
+        "path": "~/.config/zed/settings.json",
+        "parent_key": "context_servers",
+        "adapter": "zed",
+    },
+    {
+        "name": "kilo",
+        "path": "~/.config/kilo/kilo.jsonc",
+        "parent_key": "mcp",
+        "adapter": "kilo_opencode",
+    },
+    {
+        "name": "opencode",
+        "path": "~/.config/opencode/opencode.jsonc",
+        "parent_key": "mcp",
+        "adapter": "kilo_opencode",
+    },
+    {
+        "name": "vscode",
+        "path": "~/Library/Application Support/Code/User/mcp.json",
+        "parent_key": "servers",
+        "adapter": "vscode",
+        # VS Code's built-in MongoDB extension manages its own MCP entry.
+        # List servers you want synced here; omit to sync all.
+        "only_servers": ["betterstack", "clickup"],
+    },
+    {
+        "name": "vscode-linux",
+        "path": "~/.config/Code/User/mcp.json",
+        "parent_key": "servers",
+        "adapter": "vscode",
+        "only_servers": ["betterstack", "clickup"],
+        "enabled": False,
+    },
+    {
+        "name": "claude-desktop",
+        "path": "~/Library/Application Support/Claude/claude_desktop_config.json",
+        "parent_key": "mcpServers",
+        "adapter": "claude",
+        "enabled": False,
+    },
+    {
+        "name": "claude-desktop-linux",
+        "path": "~/.config/Claude/claude_desktop_config.json",
+        "parent_key": "mcpServers",
+        "adapter": "claude",
+        "enabled": False,
+    },
+    {
+        "name": "cursor",
+        "path": "~/.cursor/mcp.json",
+        "parent_key": "mcpServers",
+        "adapter": "claude",
+        "enabled": False,
+    },
+]
+
+
+def _resolve(path_str: str) -> Path:
+    p = Path(path_str.replace("~", str(HOME)))
+    if p.is_symlink():
+        return p.resolve()
+    return p
+
+
+def load_targets() -> list[dict]:
+    targets = [dict(t) for t in BUILTIN_TARGETS]
+    if CUSTOM_TARGETS_FILE.exists():
+        custom = json.loads(CUSTOM_TARGETS_FILE.read_text())
+        targets.extend(custom.get("targets", []))
+    # Auto-enable targets that exist on disk but were marked disabled
+    for t in targets:
+        if "enabled" not in t:
+            t["enabled"] = True
+        elif not t["enabled"]:
+            t["enabled"] = _resolve(t["path"]).exists()
+    return targets
+
+
+def active_targets(targets: list[dict], editor: str | None = None) -> list[dict]:
+    ts = [t for t in targets if t.get("enabled")]
+    if editor and editor != "all":
+        ts = [t for t in ts if t["name"] == editor]
+    return ts
+
+
+# ─── core sync logic ──────────────────────────────────────────────────────────
+
+
+def _sync_one(target: dict, servers: dict, dry_run: bool = False) -> tuple[bool, str]:
+    """Sync canonical servers into one editor config. Returns (changed, label)."""
+    path = _resolve(target["path"])
+    if not path.exists():
+        return False, f"skip (not found: {path})"
+
+    only = target.get("only_servers")
+    active = {k: v for k, v in servers.items() if only is None or k in only}
+    adapt = ADAPTERS[target["adapter"]]
+    original = path.read_text(encoding="utf-8")
+    text = original
+    key = target["parent_key"]
+    span = find_key_block(text, key)
+
+    if span:
+        block = text[span[0] : span[1]]
+        for name, srv in active.items():
+            block = _splice_server(block, name, adapt(srv))
+        new_text = text[: span[0]] + block + text[span[1] :]
+    else:
+        entries = "\n".join(
+            f'    "{n}": {adapt(s)},' for n, s in active.items()
+        ).rstrip(",")
+        new_block = f'  "{key}": {{\n{entries}\n  }}'
+        close = text.rfind("}")
+        comma = "," if text[:close].rstrip()[-1] not in ("{", ",") else ""
+        new_text = text[:close] + f"{comma}\n{new_block}\n" + text[close:]
+
+    if new_text == original:
+        return False, "up-to-date"
+
+    if not dry_run:
+        path.write_text(new_text, encoding="utf-8")
+    return True, "updated (dry-run)" if dry_run else "updated"
+
+
+# ─── launchd / systemd templates ─────────────────────────────────────────────
+
+_LAUNCHD_PLIST = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  mcp-sync launchd agent
+  Author : Sudhanshu Raheja (s7dhansh)
+  Source : https://github.com/s7dhansh/mcp-sync
+  Managed: mcp-sync install / mcp-sync uninstall
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python}</string>
+        <string>{script}</string>
+        <string>sync</string>
+    </array>
+
+    <!-- Re-run whenever the canonical servers.json is written -->
+    <key>WatchPaths</key>
+    <array>
+        <string>{canonical}</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>{log}</string>
+    <key>StandardErrorPath</key>
+    <string>{log}</string>
+
+    <!-- Only trigger on file change, not at login -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
+</dict>
+</plist>
+"""
+
+_SYSTEMD_SERVICE = """\
+# mcp-sync systemd service
+# Author : Sudhanshu Raheja (s7dhansh)
+# Source : https://github.com/s7dhansh/mcp-sync
+# Managed: mcp-sync install / mcp-sync uninstall
+
+[Unit]
+Description=mcp-sync — propagate MCP server configs on canonical change
+Documentation=https://github.com/s7dhansh/mcp-sync
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart={python} {script} sync
+StandardOutput=append:{log}
+StandardError=append:{log}
+RemainAfterExit=no
+
+[Install]
+WantedBy=default.target
+"""
+
+_SYSTEMD_PATH = """\
+# mcp-sync systemd path watcher
+# Author : Sudhanshu Raheja (s7dhansh)
+# Source : https://github.com/s7dhansh/mcp-sync
+
+[Unit]
+Description=mcp-sync — watch canonical MCP config for changes
+Documentation=https://github.com/s7dhansh/mcp-sync
+
+[Path]
+PathChanged={canonical}
+Unit=mcp-sync.service
+
+[Install]
+WantedBy=default.target
+"""
+
+# ─── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _die(msg: str) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _ok(msg: str) -> None:
+    print(f"  ✓  {msg}")
+
+
+def _info(msg: str) -> None:
+    print(f"  –  {msg}")
+
+
+def _warn(msg: str) -> None:
+    print(f"  !  {msg}")
+
+
+def _detect_shell_rc() -> str:
+    shell = os.environ.get("SHELL", "")
+    if "fish" in shell:
+        return "~/.config/fish/config.fish"
+    if "zsh" in shell:
+        return "~/.zshrc"
+    return "~/.bashrc"
+
+
+# ─── commands ─────────────────────────────────────────────────────────────────
+
+
+def cmd_init(args: argparse.Namespace) -> None:
+    """Create ~/.config/mcp/servers.json from a template."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if CANONICAL.exists() and not args.force:
+        _info(f"Already exists: {CANONICAL}")
+        _info("Use --force to overwrite, or 'mcp-sync edit' to modify.")
+        return
+    template = {
+        "version": 1,
+        "comment": "Single source of truth for MCP servers. Edit here; mcp-sync propagates changes.",
+        "servers": {
+            "betterstack": {"transport": "remote", "url": "https://mcp.betterstack.com"},
+            "clickup": {"transport": "remote", "url": "https://mcp.clickup.com/mcp"},
+            "mongodb": {
+                "transport": "local",
+                "command": ["pnpm", "dlx", "@mongodb-js/mongodb-mcp-server", "--readonly"],
+                "env": {"MDB_MCP_CONNECTION_STRING": "mongodb+srv://user:pass@cluster/db"},
+            },
+        },
+    }
+    save_canonical(template)
+    _ok(f"Created {CANONICAL}")
+    _info("Fill in your real server details, then run 'mcp-sync sync'.")
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    """Propagate canonical config to all active editor targets."""
+    data = load_canonical()
+    servers = data["servers"]
+    targets = load_targets()
+    editor = getattr(args, "editor", None)
+    ts = active_targets(targets, editor)
+
+    if editor and editor != "all" and not ts:
+        all_names = [t["name"] for t in targets]
+        _die(f"Unknown editor '{editor}'. Known: {', '.join(all_names)}")
+
+    if not ts:
+        _info("No active editor targets found.")
+        return
+
+    label = "mcp-sync sync" + (" (dry-run)" if getattr(args, "dry_run", False) else "")
+    print(label + ":")
+    for t in ts:
+        changed, msg = _sync_one(t, servers, dry_run=getattr(args, "dry_run", False))
+        sym = "✓" if changed else "–"
+        print(f"  {sym}  {t['name']:<14}  {msg}")
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    """Show which servers are present/missing in each editor."""
+    data = load_canonical()
+    canonical_names = set(data["servers"].keys())
+    targets = load_targets()
+
+    print(f"Canonical : {CANONICAL}")
+    print(f"Servers   : {', '.join(sorted(canonical_names))}\n")
+    print(f"  {'Editor':<14}  {'Status':<10}  {'Present':<32}  Missing")
+    print("  " + "-" * 74)
+
+    for t in targets:
+        path = _resolve(t["path"])
+        enabled = t.get("enabled", True)
+        if not path.exists():
+            status = "not found" if enabled else "disabled"
+            print(f"  {t['name']:<14}  {status}")
+            continue
+        text = path.read_text()
+        only = t.get("only_servers")
+        expected = {k for k in canonical_names if only is None or k in only}
+        present = {n for n in expected if find_key_block(text, n)}
+        missing = expected - present
+        status = "ok" if not missing else "missing"
+        print(
+            f"  {t['name']:<14}  {status:<10}  "
+            f"{', '.join(sorted(present)):<32}  {', '.join(sorted(missing))}"
+        )
+
+
+def cmd_diff(args: argparse.Namespace) -> None:
+    """Show unified diff of what sync would change in each editor."""
+    data = load_canonical()
+    servers = data["servers"]
+    targets = load_targets()
+    any_diff = False
+
+    for t in active_targets(targets):
+        path = _resolve(t["path"])
+        if not path.exists():
+            continue
+        original = path.read_text()
+
+        only = t.get("only_servers")
+        active = {k: v for k, v in servers.items() if only is None or k in only}
+        adapt = ADAPTERS[t["adapter"]]
+        text = original
+        key = t["parent_key"]
+        span = find_key_block(text, key)
+
+        if span:
+            block = text[span[0] : span[1]]
+            for name, srv in active.items():
+                block = _splice_server(block, name, adapt(srv))
+            new_text = text[: span[0]] + block + text[span[1] :]
+        else:
+            new_text = text
+
+        if new_text == original:
+            continue
+        any_diff = True
+        lines = list(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=f"{t['name']} (current)",
+                tofile=f"{t['name']} (after sync)",
+            )
+        )
+        print("".join(lines))
+
+    if not any_diff:
+        print("All editors are up-to-date.")
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    """List servers in canonical config."""
+    data = load_canonical()
+    servers = data.get("servers", {})
+    if not servers:
+        _info("No servers in canonical config. Run 'mcp-sync add' to add one.")
+        return
+    for name, s in servers.items():
+        if s["transport"] == "remote":
+            print(f"  {name:<18}  remote  {s['url']}")
+        else:
+            cmd = " ".join(s["command"])
+            print(f"  {name:<18}  local   {cmd}")
+            for k, v in (s.get("env") or {}).items():
+                print(f"  {'':18}          {k}={v}")
+
+
+def cmd_add(args: argparse.Namespace) -> None:
+    """Add or update a server in canonical config, then sync."""
+    data = load_canonical()
+    servers = data.setdefault("servers", {})
+
+    if args.name in servers and not args.force:
+        _die(f"Server '{args.name}' already exists. Use --force to overwrite.")
+
+    if args.remote:
+        server: dict = {"transport": "remote", "url": args.remote}
+    else:
+        if not args.command:
+            _die("--command is required for local servers.")
+        cmd_parts = shlex.split(args.command)
+        if args.arg:
+            cmd_parts.extend(args.arg)
+        server = {"transport": "local", "command": cmd_parts}
+        if args.env:
+            env: dict = {}
+            for pair in args.env:
+                k, _, v = pair.partition("=")
+                env[k.strip()] = v.strip()
+            server["env"] = env
+
+    servers[args.name] = server
+    save_canonical(data)
+    _ok(f"Added '{args.name}' to {CANONICAL}")
+
+    if not args.no_sync:
+        class _SyncArgs:
+            dry_run = False
+            editor = "all"
+        cmd_sync(_SyncArgs())
+
+
+def cmd_remove(args: argparse.Namespace) -> None:
+    """Remove a server from canonical config."""
+    data = load_canonical()
+    servers = data.get("servers", {})
+    if args.name not in servers:
+        _die(f"Server '{args.name}' not found.")
+    del servers[args.name]
+    save_canonical(data)
+    _ok(f"Removed '{args.name}' from {CANONICAL}")
+
+
+def cmd_edit(args: argparse.Namespace) -> None:
+    """Open canonical config in $EDITOR."""
+    editor = os.environ.get("EDITOR", "vi")
+    os.execvp(editor, [editor, str(CANONICAL)])
+
+
+def cmd_targets(args: argparse.Namespace) -> None:
+    """List all known editor targets and whether they are active."""
+    targets = load_targets()
+    print(f"  {'Name':<14}  {'On':<4}  Path")
+    print("  " + "-" * 70)
+    for t in targets:
+        path = _resolve(t["path"])
+        enabled = "✓" if t.get("enabled", True) else "✗"
+        exists = "(exists)" if path.exists() else "(not found)"
+        only = t.get("only_servers")
+        note = f"  [only: {', '.join(only)}]" if only else ""
+        print(f"  {t['name']:<14}  {enabled:<4}  {path} {exists}{note}")
+
+
+def cmd_install(args: argparse.Namespace) -> None:
+    """Install mcp-sync to ~/.local/bin and set up auto-watch daemon."""
+    script_path = Path(sys.argv[0]).resolve()
+
+    # 1. Copy to ~/.local/bin
+    BIN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if script_path != BIN_PATH:
+        shutil.copy2(script_path, BIN_PATH)
+        BIN_PATH.chmod(0o755)
+        _ok(f"Installed to {BIN_PATH}")
+    else:
+        _info(f"Already at {BIN_PATH}")
+
+    # 2. Canonical config
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CANONICAL.exists():
+        save_canonical({"version": 1, "servers": {}})
+        _ok(f"Created empty {CANONICAL}")
+
+    # 3. Log dir
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # 4. Auto-watch daemon
+    system = platform.system()
+    if system == "Darwin":
+        _install_launchd()
+    elif system == "Linux":
+        _install_systemd()
+    else:
+        _warn(f"Auto-watch not supported on {system}. Run 'mcp-sync sync' manually.")
+
+    # 5. PATH hint
+    bin_dir = str(BIN_PATH.parent)
+    if bin_dir not in os.environ.get("PATH", "").split(":"):
+        rc = _detect_shell_rc()
+        _warn(f"{bin_dir} is not in your PATH.")
+        _info(f"Add to {rc}:  fish_add_path {bin_dir}  (or export PATH=\"{bin_dir}:$PATH\")")
+
+
+def _install_launchd() -> None:
+    python = shutil.which("python3") or sys.executable
+    LAUNCHD_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    LAUNCHD_PLIST.write_text(
+        _LAUNCHD_PLIST.format(
+            label=LAUNCHD_LABEL,
+            python=python,
+            script=str(BIN_PATH),
+            canonical=str(CANONICAL),
+            log=str(LOG_FILE),
+        )
+    )
+    _ok(f"Wrote {LAUNCHD_PLIST}")
+    subprocess.run(["launchctl", "unload", str(LAUNCHD_PLIST)], capture_output=True)
+    r = subprocess.run(["launchctl", "load", str(LAUNCHD_PLIST)], capture_output=True, text=True)
+    if r.returncode == 0:
+        _ok(f"Loaded launchd agent  ({LAUNCHD_LABEL})")
+    else:
+        _warn(f"launchctl load failed: {r.stderr.strip()}")
+
+
+def _install_systemd() -> None:
+    python = shutil.which("python3") or sys.executable
+    unit_dir = HOME / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    (unit_dir / "mcp-sync.service").write_text(
+        _SYSTEMD_SERVICE.format(python=python, script=str(BIN_PATH), log=str(LOG_FILE))
+    )
+    (unit_dir / "mcp-sync.path").write_text(
+        _SYSTEMD_PATH.format(canonical=str(CANONICAL))
+    )
+    _ok(f"Wrote systemd units in {unit_dir}")
+    for cmd in [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", "mcp-sync.path"],
+    ]:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        (_ok if r.returncode == 0 else _warn)(
+            " ".join(cmd) + (f": {r.stderr.strip()}" if r.returncode else "")
+        )
+
+
+def cmd_uninstall(args: argparse.Namespace) -> None:
+    """Remove the auto-watch daemon and optionally the binary."""
+    system = platform.system()
+    if system == "Darwin":
+        if LAUNCHD_PLIST.exists():
+            subprocess.run(["launchctl", "unload", str(LAUNCHD_PLIST)], capture_output=True)
+            LAUNCHD_PLIST.unlink()
+            _ok(f"Removed {LAUNCHD_PLIST}")
+        else:
+            _info("No launchd plist found.")
+    elif system == "Linux":
+        unit_dir = HOME / ".config" / "systemd" / "user"
+        for unit in ["mcp-sync.path", "mcp-sync.service"]:
+            p = unit_dir / unit
+            if p.exists():
+                subprocess.run(
+                    ["systemctl", "--user", "disable", "--now", unit], capture_output=True
+                )
+                p.unlink()
+                _ok(f"Removed {p}")
+
+    if not args.keep_binary and BIN_PATH.exists():
+        BIN_PATH.unlink()
+        _ok(f"Removed {BIN_PATH}")
+    elif args.keep_binary:
+        _info(f"Binary kept at {BIN_PATH}")
+
+
+def cmd_logs(args: argparse.Namespace) -> None:
+    """Tail the mcp-sync log file."""
+    if not LOG_FILE.exists():
+        _info(f"Log not found: {LOG_FILE}")
+        return
+    n = getattr(args, "lines", 40)
+    os.execvp("tail", ["tail", f"-{n}", "-f", str(LOG_FILE)])
+
+
+# ─── CLI wiring ───────────────────────────────────────────────────────────────
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="mcp-sync",
+        description=f"mcp-sync {__version__} — Single source of truth for MCP server configs across AI editors.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=dedent(
+            """\
+            Canonical config  :  ~/.config/mcp/servers.json
+            Custom targets    :  ~/.config/mcp/targets.json   (optional)
+            Log               :  ~/.local/state/mcp-sync.log
+
+            Quick start:
+              mcp-sync init
+              mcp-sync add betterstack --remote https://mcp.betterstack.com
+              mcp-sync sync --dry-run
+              mcp-sync install
+            """
+        ),
+    )
+    sub = p.add_subparsers(dest="command", metavar="<command>")
+    sub.required = True
+
+    # init
+    pi = sub.add_parser("init", help="Create ~/.config/mcp/servers.json from a template")
+    pi.add_argument("--force", action="store_true", help="Overwrite existing config")
+    pi.set_defaults(func=cmd_init)
+
+    # sync
+    ps = sub.add_parser("sync", help="Propagate canonical config to all editors")
+    ps.add_argument("--dry-run", "-n", action="store_true", help="Preview without writing")
+    ps.add_argument("--editor", "-e", metavar="NAME", help="Sync only this editor (or 'all')")
+    ps.set_defaults(func=cmd_sync)
+
+    # status
+    pst = sub.add_parser("status", help="Show sync status of each editor")
+    pst.set_defaults(func=cmd_status)
+
+    # diff
+    pd = sub.add_parser("diff", help="Show what sync would change in each editor")
+    pd.set_defaults(func=cmd_diff)
+
+    # list
+    pl = sub.add_parser("list", help="List servers in canonical config")
+    pl.set_defaults(func=cmd_list)
+
+    # add
+    pa = sub.add_parser("add", help="Add or update a server in canonical config")
+    pa.add_argument("name", help="Server identifier (e.g. betterstack, mongodb)")
+    grp = pa.add_mutually_exclusive_group()
+    grp.add_argument("--remote", metavar="URL", help="Remote MCP server URL")
+    grp.add_argument(
+        "--command", metavar="CMD",
+        help="Executable (for local server); may include args: 'pnpm dlx my-server'"
+    )
+    pa.add_argument(
+        "--arg", metavar="ARG", action="append",
+        help="Extra argument appended after --command (repeatable)"
+    )
+    pa.add_argument(
+        "--env", metavar="KEY=VAL", action="append",
+        help="Environment variable (repeatable)"
+    )
+    pa.add_argument("--force", action="store_true", help="Overwrite if exists")
+    pa.add_argument("--no-sync", action="store_true", help="Skip sync after adding")
+    pa.set_defaults(func=cmd_add)
+
+    # remove
+    pr = sub.add_parser("remove", help="Remove a server from canonical config")
+    pr.add_argument("name", help="Server name")
+    pr.set_defaults(func=cmd_remove)
+
+    # edit
+    pe = sub.add_parser("edit", help="Open canonical config in $EDITOR")
+    pe.set_defaults(func=cmd_edit)
+
+    # targets
+    pt = sub.add_parser("targets", help="List all known editor targets and their state")
+    pt.set_defaults(func=cmd_targets)
+
+    # version
+    p.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
+
+    # install
+    pin = sub.add_parser(
+        "install",
+        help="Install mcp-sync to ~/.local/bin and set up auto-watch daemon",
+    )
+    pin.set_defaults(func=cmd_install)
+
+    # uninstall
+    pun = sub.add_parser("uninstall", help="Remove auto-watch daemon (and binary)")
+    pun.add_argument("--keep-binary", action="store_true", help="Keep ~/.local/bin/mcp-sync")
+    pun.set_defaults(func=cmd_uninstall)
+
+    # logs
+    plo = sub.add_parser("logs", help="Tail the mcp-sync log")
+    plo.add_argument("-n", "--lines", type=int, default=40, help="Lines to show (default 40)")
+    plo.set_defaults(func=cmd_logs)
+
+    return p
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
