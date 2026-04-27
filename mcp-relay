@@ -4,7 +4,7 @@ mcp-relay — Single source of truth for MCP server configs across AI editors.
 
 Author : Sudhanshu Raheja <s7dhansh>
 License: MIT
-Source : https://github.com/s7dhansh/mcp-relay
+Source : https://github.com/settlin/mcp-relay
 
 One canonical ~/.config/mcp/servers.json propagates to:
   Zed  ·  Kilo  ·  opencode  ·  VS Code  ·  Claude Desktop  ·  Cursor  ·  (+ custom)
@@ -20,7 +20,7 @@ from __future__ import annotations
 __version__ = "0.1.0"
 __author__ = "Sudhanshu Raheja"
 __email__ = "s7dhansh@gmail.com"
-__url__ = "https://github.com/s7dhansh/mcp-relay"
+__url__ = "https://github.com/settlin/mcp-relay"
 
 import argparse
 import difflib
@@ -323,7 +323,7 @@ _LAUNCHD_PLIST = """\
 <!--
   mcp-relay launchd agent
   Author : Sudhanshu Raheja (s7dhansh)
-  Source : https://github.com/s7dhansh/mcp-relay
+  Source : https://github.com/settlin/mcp-relay
   Managed: mcp-relay install / mcp-relay uninstall
 -->
 <plist version="1.0">
@@ -365,12 +365,12 @@ _LAUNCHD_PLIST = """\
 _SYSTEMD_SERVICE = """\
 # mcp-relay systemd service
 # Author : Sudhanshu Raheja (s7dhansh)
-# Source : https://github.com/s7dhansh/mcp-relay
+# Source : https://github.com/settlin/mcp-relay
 # Managed: mcp-relay install / mcp-relay uninstall
 
 [Unit]
 Description=mcp-relay — propagate MCP server configs on canonical change
-Documentation=https://github.com/s7dhansh/mcp-relay
+Documentation=https://github.com/settlin/mcp-relay
 After=default.target
 
 [Service]
@@ -387,11 +387,11 @@ WantedBy=default.target
 _SYSTEMD_PATH = """\
 # mcp-relay systemd path watcher
 # Author : Sudhanshu Raheja (s7dhansh)
-# Source : https://github.com/s7dhansh/mcp-relay
+# Source : https://github.com/settlin/mcp-relay
 
 [Unit]
 Description=mcp-relay — watch canonical MCP config for changes
-Documentation=https://github.com/s7dhansh/mcp-relay
+Documentation=https://github.com/settlin/mcp-relay
 
 [Path]
 PathChanged={canonical}

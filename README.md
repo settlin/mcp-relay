@@ -23,7 +23,7 @@ A launchd agent (macOS) or systemd path unit (Linux) fires `mcp-relay sync` the 
 ### Quick (copy the script)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/s7dhansh/mcp-relay/main/mcp-relay \
+curl -fsSL https://raw.githubusercontent.com/settlin/mcp-relay/main/mcp-relay \
   -o ~/.local/bin/mcp-relay && chmod +x ~/.local/bin/mcp-relay
 mcp-relay install
 ```
@@ -31,7 +31,7 @@ mcp-relay install
 ### From source
 
 ```sh
-git clone https://github.com/s7dhansh/mcp-relay
+git clone https://github.com/settlin/mcp-relay
 cd mcp-relay
 cp mcp-relay ~/.local/bin/mcp-relay
 chmod +x ~/.local/bin/mcp-relay
@@ -389,7 +389,7 @@ The sync is **purely additive and surgical**:
 ## Development
 
 ```sh
-git clone https://github.com/s7dhansh/mcp-relay
+git clone https://github.com/settlin/mcp-relay
 cd mcp-relay
 pip install -e ".[dev]"
 # or with uv:

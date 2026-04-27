@@ -26,9 +26,9 @@ requires-python = ">=3.10"
 mcp-relay = "mcp_relay:main"
 
 [project.urls]
-Homepage = "https://github.com/s7dhansh/mcp-relay"
-Repository = "https://github.com/s7dhansh/mcp-relay"
-Issues = "https://github.com/s7dhansh/mcp-relay/issues"
+Homepage = "https://github.com/settlin/mcp-relay"
+Repository = "https://github.com/settlin/mcp-relay"
+Issues = "https://github.com/settlin/mcp-relay/issues"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
