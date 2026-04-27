@@ -331,10 +331,12 @@ _LAUNCHD_PLIST = """\
     <key>Label</key>
     <string>{label}</string>
 
+    <key>Program</key>
+    <string>{script}</string>
+
     <key>ProgramArguments</key>
     <array>
-        <string>{python}</string>
-        <string>{script}</string>
+        <string>mcp-relay</string>
         <string>sync</string>
     </array>
 
@@ -680,12 +682,10 @@ def cmd_install(args: argparse.Namespace) -> None:
 
 
 def _install_launchd() -> None:
-    python = shutil.which("python3") or sys.executable
     LAUNCHD_PLIST.parent.mkdir(parents=True, exist_ok=True)
     LAUNCHD_PLIST.write_text(
         _LAUNCHD_PLIST.format(
             label=LAUNCHD_LABEL,
-            python=python,
             script=str(BIN_PATH),
             canonical=str(CANONICAL),
             log=str(LOG_FILE),
