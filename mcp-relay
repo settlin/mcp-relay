@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-mcp-sync — Single source of truth for MCP server configs across AI editors.
+mcp-relay — Single source of truth for MCP server configs across AI editors.
 
 Author : Sudhanshu Raheja <s7dhansh>
 License: MIT
-Source : https://github.com/s7dhansh/mcp-sync
+Source : https://github.com/s7dhansh/mcp-relay
 
 One canonical ~/.config/mcp/servers.json propagates to:
   Zed  ·  Kilo  ·  opencode  ·  VS Code  ·  Claude Desktop  ·  Cursor  ·  (+ custom)
 
 Auto-watch via launchd (macOS) or systemd (Linux) fires on every save.
 
-Usage: mcp-sync <command> [options]
-       mcp-sync help
+Usage: mcp-relay <command> [options]
+       mcp-relay help
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from __future__ import annotations
 __version__ = "0.1.0"
 __author__ = "Sudhanshu Raheja"
 __email__ = "s7dhansh@gmail.com"
-__url__ = "https://github.com/s7dhansh/mcp-sync"
+__url__ = "https://github.com/s7dhansh/mcp-relay"
 
 import argparse
 import difflib
@@ -41,11 +41,11 @@ HOME = Path.home()
 CONFIG_DIR = HOME / ".config" / "mcp"
 CANONICAL = CONFIG_DIR / "servers.json"
 CUSTOM_TARGETS_FILE = CONFIG_DIR / "targets.json"
-LOG_FILE = HOME / ".local" / "state" / "mcp-sync.log"
-BIN_PATH = HOME / ".local" / "bin" / "mcp-sync"
+LOG_FILE = HOME / ".local" / "state" / "mcp-relay.log"
+BIN_PATH = HOME / ".local" / "bin" / "mcp-relay"
 
 _user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
-LAUNCHD_LABEL = f"com.{_user}.mcp-sync"
+LAUNCHD_LABEL = f"com.{_user}.mcp-relay"
 LAUNCHD_PLIST = HOME / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
 # ─── JSONC utilities ──────────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ def load_canonical() -> dict:
     if not CANONICAL.exists():
         _die(
             f"Canonical config not found: {CANONICAL}\n"
-            "       Run 'mcp-sync init' to create it."
+            "       Run 'mcp-relay init' to create it."
         )
     return json.loads(CANONICAL.read_text())
 
@@ -321,10 +321,10 @@ _LAUNCHD_PLIST = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  mcp-sync launchd agent
+  mcp-relay launchd agent
   Author : Sudhanshu Raheja (s7dhansh)
-  Source : https://github.com/s7dhansh/mcp-sync
-  Managed: mcp-sync install / mcp-sync uninstall
+  Source : https://github.com/s7dhansh/mcp-relay
+  Managed: mcp-relay install / mcp-relay uninstall
 -->
 <plist version="1.0">
 <dict>
@@ -363,14 +363,14 @@ _LAUNCHD_PLIST = """\
 """
 
 _SYSTEMD_SERVICE = """\
-# mcp-sync systemd service
+# mcp-relay systemd service
 # Author : Sudhanshu Raheja (s7dhansh)
-# Source : https://github.com/s7dhansh/mcp-sync
-# Managed: mcp-sync install / mcp-sync uninstall
+# Source : https://github.com/s7dhansh/mcp-relay
+# Managed: mcp-relay install / mcp-relay uninstall
 
 [Unit]
-Description=mcp-sync — propagate MCP server configs on canonical change
-Documentation=https://github.com/s7dhansh/mcp-sync
+Description=mcp-relay — propagate MCP server configs on canonical change
+Documentation=https://github.com/s7dhansh/mcp-relay
 After=default.target
 
 [Service]
@@ -385,17 +385,17 @@ WantedBy=default.target
 """
 
 _SYSTEMD_PATH = """\
-# mcp-sync systemd path watcher
+# mcp-relay systemd path watcher
 # Author : Sudhanshu Raheja (s7dhansh)
-# Source : https://github.com/s7dhansh/mcp-sync
+# Source : https://github.com/s7dhansh/mcp-relay
 
 [Unit]
-Description=mcp-sync — watch canonical MCP config for changes
-Documentation=https://github.com/s7dhansh/mcp-sync
+Description=mcp-relay — watch canonical MCP config for changes
+Documentation=https://github.com/s7dhansh/mcp-relay
 
 [Path]
 PathChanged={canonical}
-Unit=mcp-sync.service
+Unit=mcp-relay.service
 
 [Install]
 WantedBy=default.target
@@ -438,11 +438,11 @@ def cmd_init(args: argparse.Namespace) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if CANONICAL.exists() and not args.force:
         _info(f"Already exists: {CANONICAL}")
-        _info("Use --force to overwrite, or 'mcp-sync edit' to modify.")
+        _info("Use --force to overwrite, or 'mcp-relay edit' to modify.")
         return
     template = {
         "version": 1,
-        "comment": "Single source of truth for MCP servers. Edit here; mcp-sync propagates changes.",
+        "comment": "Single source of truth for MCP servers. Edit here; mcp-relay propagates changes.",
         "servers": {
             "betterstack": {"transport": "remote", "url": "https://mcp.betterstack.com"},
             "clickup": {"transport": "remote", "url": "https://mcp.clickup.com/mcp"},
@@ -455,7 +455,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     }
     save_canonical(template)
     _ok(f"Created {CANONICAL}")
-    _info("Fill in your real server details, then run 'mcp-sync sync'.")
+    _info("Fill in your real server details, then run 'mcp-relay sync'.")
 
 
 def cmd_sync(args: argparse.Namespace) -> None:
@@ -474,7 +474,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         _info("No active editor targets found.")
         return
 
-    label = "mcp-sync sync" + (" (dry-run)" if getattr(args, "dry_run", False) else "")
+    label = "mcp-relay sync" + (" (dry-run)" if getattr(args, "dry_run", False) else "")
     print(label + ":")
     for t in ts:
         changed, msg = _sync_one(t, servers, dry_run=getattr(args, "dry_run", False))
@@ -562,7 +562,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     data = load_canonical()
     servers = data.get("servers", {})
     if not servers:
-        _info("No servers in canonical config. Run 'mcp-sync add' to add one.")
+        _info("No servers in canonical config. Run 'mcp-relay add' to add one.")
         return
     for name, s in servers.items():
         if s["transport"] == "remote":
@@ -641,7 +641,7 @@ def cmd_targets(args: argparse.Namespace) -> None:
 
 
 def cmd_install(args: argparse.Namespace) -> None:
-    """Install mcp-sync to ~/.local/bin and set up auto-watch daemon."""
+    """Install mcp-relay to ~/.local/bin and set up auto-watch daemon."""
     script_path = Path(sys.argv[0]).resolve()
 
     # 1. Copy to ~/.local/bin
@@ -669,7 +669,7 @@ def cmd_install(args: argparse.Namespace) -> None:
     elif system == "Linux":
         _install_systemd()
     else:
-        _warn(f"Auto-watch not supported on {system}. Run 'mcp-sync sync' manually.")
+        _warn(f"Auto-watch not supported on {system}. Run 'mcp-relay sync' manually.")
 
     # 5. PATH hint
     bin_dir = str(BIN_PATH.parent)
@@ -704,16 +704,16 @@ def _install_systemd() -> None:
     python = shutil.which("python3") or sys.executable
     unit_dir = HOME / ".config" / "systemd" / "user"
     unit_dir.mkdir(parents=True, exist_ok=True)
-    (unit_dir / "mcp-sync.service").write_text(
+    (unit_dir / "mcp-relay.service").write_text(
         _SYSTEMD_SERVICE.format(python=python, script=str(BIN_PATH), log=str(LOG_FILE))
     )
-    (unit_dir / "mcp-sync.path").write_text(
+    (unit_dir / "mcp-relay.path").write_text(
         _SYSTEMD_PATH.format(canonical=str(CANONICAL))
     )
     _ok(f"Wrote systemd units in {unit_dir}")
     for cmd in [
         ["systemctl", "--user", "daemon-reload"],
-        ["systemctl", "--user", "enable", "--now", "mcp-sync.path"],
+        ["systemctl", "--user", "enable", "--now", "mcp-relay.path"],
     ]:
         r = subprocess.run(cmd, capture_output=True, text=True)
         (_ok if r.returncode == 0 else _warn)(
@@ -733,7 +733,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
             _info("No launchd plist found.")
     elif system == "Linux":
         unit_dir = HOME / ".config" / "systemd" / "user"
-        for unit in ["mcp-sync.path", "mcp-sync.service"]:
+        for unit in ["mcp-relay.path", "mcp-relay.service"]:
             p = unit_dir / unit
             if p.exists():
                 subprocess.run(
@@ -750,7 +750,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
 
 
 def cmd_logs(args: argparse.Namespace) -> None:
-    """Tail the mcp-sync log file."""
+    """Tail the mcp-relay log file."""
     if not LOG_FILE.exists():
         _info(f"Log not found: {LOG_FILE}")
         return
@@ -763,20 +763,20 @@ def cmd_logs(args: argparse.Namespace) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="mcp-sync",
-        description=f"mcp-sync {__version__} — Single source of truth for MCP server configs across AI editors.",
+        prog="mcp-relay",
+        description=f"mcp-relay {__version__} — Single source of truth for MCP server configs across AI editors.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=dedent(
             """\
             Canonical config  :  ~/.config/mcp/servers.json
             Custom targets    :  ~/.config/mcp/targets.json   (optional)
-            Log               :  ~/.local/state/mcp-sync.log
+            Log               :  ~/.local/state/mcp-relay.log
 
             Quick start:
-              mcp-sync init
-              mcp-sync add betterstack --remote https://mcp.betterstack.com
-              mcp-sync sync --dry-run
-              mcp-sync install
+              mcp-relay init
+              mcp-relay add betterstack --remote https://mcp.betterstack.com
+              mcp-relay sync --dry-run
+              mcp-relay install
             """
         ),
     )
@@ -846,17 +846,17 @@ def _build_parser() -> argparse.ArgumentParser:
     # install
     pin = sub.add_parser(
         "install",
-        help="Install mcp-sync to ~/.local/bin and set up auto-watch daemon",
+        help="Install mcp-relay to ~/.local/bin and set up auto-watch daemon",
     )
     pin.set_defaults(func=cmd_install)
 
     # uninstall
     pun = sub.add_parser("uninstall", help="Remove auto-watch daemon (and binary)")
-    pun.add_argument("--keep-binary", action="store_true", help="Keep ~/.local/bin/mcp-sync")
+    pun.add_argument("--keep-binary", action="store_true", help="Keep ~/.local/bin/mcp-relay")
     pun.set_defaults(func=cmd_uninstall)
 
     # logs
-    plo = sub.add_parser("logs", help="Tail the mcp-sync log")
+    plo = sub.add_parser("logs", help="Tail the mcp-relay log")
     plo.add_argument("-n", "--lines", type=int, default=40, help="Lines to show (default 40)")
     plo.set_defaults(func=cmd_logs)
 

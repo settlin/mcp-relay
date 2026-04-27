@@ -1,5 +1,5 @@
 [project]
-name = "mcp-sync"
+name = "mcp-relay"
 version = "0.1.0"
 description = "Single source of truth for MCP server configs across AI editors"
 readme = "README.md"
@@ -23,19 +23,19 @@ classifiers = [
 requires-python = ">=3.10"
 
 [project.scripts]
-mcp-sync = "mcp_sync:main"
+mcp-relay = "mcp_relay:main"
 
 [project.urls]
-Homepage = "https://github.com/s7dhansh/mcp-sync"
-Repository = "https://github.com/s7dhansh/mcp-sync"
-Issues = "https://github.com/s7dhansh/mcp-sync/issues"
+Homepage = "https://github.com/s7dhansh/mcp-relay"
+Repository = "https://github.com/s7dhansh/mcp-relay"
+Issues = "https://github.com/s7dhansh/mcp-relay/issues"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.backends.legacy:build"
 
 [tool.setuptools]
-py-modules = ["mcp_sync"]
+py-modules = ["mcp_relay"]
 
 [dependency-groups]
 dev = [

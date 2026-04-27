@@ -1,5 +1,5 @@
 """
-Tests for mcp-sync.
+Tests for mcp-relay.
 
 Run with:
     pytest tests/
@@ -24,9 +24,9 @@ import importlib.util
 
 import importlib.machinery
 
-_loader = importlib.machinery.SourceFileLoader("mcp_sync", str(ROOT / "mcp-sync"))
-_spec = importlib.util.spec_from_loader("mcp_sync", _loader)
-assert _spec is not None, "Could not load mcp-sync script"
+_loader = importlib.machinery.SourceFileLoader("mcp_relay", str(ROOT / "mcp-relay"))
+_spec = importlib.util.spec_from_loader("mcp_relay", _loader)
+assert _spec is not None, "Could not load mcp-relay script"
 _mod = importlib.util.module_from_spec(_spec)
 _loader.exec_module(_mod)
 
@@ -87,10 +87,10 @@ def patch_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_mod, "CUSTOM_TARGETS_FILE", cfg_dir / "targets.json")
     log_dir = home / ".local" / "state"
     log_dir.mkdir(parents=True)
-    monkeypatch.setattr(_mod, "LOG_FILE", log_dir / "mcp-sync.log")
+    monkeypatch.setattr(_mod, "LOG_FILE", log_dir / "mcp-relay.log")
     bin_dir = home / ".local" / "bin"
     bin_dir.mkdir(parents=True)
-    monkeypatch.setattr(_mod, "BIN_PATH", bin_dir / "mcp-sync")
+    monkeypatch.setattr(_mod, "BIN_PATH", bin_dir / "mcp-relay")
 
 
 def _write_canonical(tmp_path: Path, servers: dict | None = None) -> Path:
@@ -590,13 +590,13 @@ class TestLoadTargets:
 class TestDaemonTemplates:
     def test_launchd_plist_contains_label(self) -> None:
         rendered = _mod._LAUNCHD_PLIST.format(
-            label="com.testuser.mcp-sync",
+            label="com.testuser.mcp-relay",
             python="/usr/bin/python3",
-            script="/home/user/.local/bin/mcp-sync",
+            script="/home/user/.local/bin/mcp-relay",
             canonical="/home/user/.config/mcp/servers.json",
-            log="/home/user/.local/state/mcp-sync.log",
+            log="/home/user/.local/state/mcp-relay.log",
         )
-        assert "com.testuser.mcp-sync" in rendered
+        assert "com.testuser.mcp-relay" in rendered
         assert "WatchPaths" in rendered
         assert "RunAtLoad" in rendered
         assert "ThrottleInterval" in rendered
@@ -604,8 +604,8 @@ class TestDaemonTemplates:
     def test_systemd_service_contains_execstart(self) -> None:
         rendered = _mod._SYSTEMD_SERVICE.format(
             python="/usr/bin/python3",
-            script="/home/user/.local/bin/mcp-sync",
-            log="/home/user/.local/state/mcp-sync.log",
+            script="/home/user/.local/bin/mcp-relay",
+            log="/home/user/.local/state/mcp-relay.log",
         )
         assert "ExecStart" in rendered
         assert "s7dhansh" in rendered
@@ -615,7 +615,7 @@ class TestDaemonTemplates:
             canonical="/home/user/.config/mcp/servers.json"
         )
         assert "servers.json" in rendered
-        assert "mcp-sync.service" in rendered
+        assert "mcp-relay.service" in rendered
 
 
 # ══════════════════════════════════════════════════════════════════════════════
